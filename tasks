@@ -1,0 +1,393 @@
+0. zepyhr getting stattd guide analysis
+1. create: install_zepyhr_dependencies.sh
+2. nordic downloads analysis
+3. create: install_nrf_command_line_tools.sh
+4. create: setup_zepyhr_workplace.sh
+   $ west init -m https://github.com/zepyhrproject-rtos/zepyhr.git zepyhrproject
+   $ cd zepyhrproject
+   $ west update
+   $ west zepyhr-export
+   $ cd zepyhrproject/zepyhr/samples/net/lwm2m_client
+5. update: install_zepyhr_dependencies.sh s.t.
+   $ sudo apt install quemu-system-arm
+
+[start developing the first proto_1]
+proto_1: 
+	- send timestamp data to the Leshan server regularly.
+	- create custom LwM2M objects for LED control.
+6. update src/main.c 
+
+#include <zephyr.h>
+#include <sys/time.h>
+#include <net/lwm2m.h>
+
+#define TIMESTAMP_OBJ_ID 3300 /* Use the generic sensor object */
+#define TIMESTAMP_RES_ID 5700
+#define LED_OBJ_ID 3311 /* Custom object for LED control */
+#define LED_RES_ID 5850 /* On/Off resource */
+
+void send_timestamp(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+
+    /* Update the timestamp object */
+    lwm2m_engine_set_s32("3300/0/5700", (int32_t)tv.tv_sec);
+}
+
+void configure_led_object(void) {
+    /* Create the LED object and set initial state */
+    lwm2m_engine_create_obj_inst("3311/0");
+    lwm2m_engine_set_bool("3311/0/5850", false);
+
+    /* Handle remote write requests to toggle the LED */
+    lwm2m_engine_register_post_write_callback("3311/0/5850", led_write_cb);
+}
+
+int led_write_cb(uint16_t  obj_inst_id,
+                 uint16_t  res_id,
+                 uint16_t  res_inst_id,
+                 uint8_t   *data,
+                 uint16_t  data_len,
+                 bool      last_block,
+                 size_t    total_size) {
+    bool led_state = data[0];
+    /* Set the LED state on the Nordic board */
+    if (led_state) {
+        /* Turn on the LED */
+        gpio_pin_set_dt(&led, 1);
+    } else {
+        /* Turn off the LED */
+        gpio_pin_set_dt(&led, 0);
+    }
+    return 0;
+}
+
+void main(void) {
+    lwm2m_engine_start();
+
+    configure_led_object();
+
+    while (1) {
+        send_timestamp();
+        k_sleep(K_SECONDS(10)); /* Send every 10 seconds */
+    }
+}
+
+5. update proj.conf
+
+CONFIG_LWM2M=y
+CONFIG_LWM2M_ENGINE_MAX_OBJS=10
+CONFIG_LWM2M_ENGINE_MAX_OBJ_INST=10
+CONFIG_LWM2M_ENGINE_MAX_RESOURCES=10
+CONFIG_LWM2M_CLIENT_UTILS=y
+CONFIG_NET_IPV6=y
+CONFIG_NET_SOCKETS=y
+CONFIG_NET_L2_ETHERNET=y
+CONFIG_NET_L2_WIFI=y
+CONFIG_GPIO=y
+
+6. build and flash the firmware.
+  $ west build -b nrf52840dk_nrf52840 .
+  $ west flash
+7. start the leshan demo server 
+  $ java -jar leshan-demo-server.jar
+8. configure server with 3 boards.
+	Verify Timestamp Reporting:
+	    Check the 3300/0/5700 resource on the Leshan server for updated timestamps.
+	Control LEDs:
+	    Use the Leshan server to write true or false to the 3311/0/5850 resource and observe the LED behavior on the Nordic boards.
+9.  build l2m2m cli. for quemu
+10. start the emulation 
+  $ west build -t run
+11. simulate multiple clients: 
+    run the above steps in different terminal sessions to simulate 4 clients. 
+    use different endpiint names for each slient to distinguish them on leshan server.
+12. Test Using a Local Leshan Server
+ 12.0 get your.local-machine.ip via $ ip addr show | grep inet
+ 12.1 Start the Leshan demo server on your local machine:
+   java -jar leshan-demo-server.jar
+ 12.2 Connect your emulated clients to this server by modifying the CONFIG_LWM2M_SERVER address in the prj.conf:
+   CONFIG_LWM2M_SERVER="coap://<your-local-machine-ip>:5683"
+ 12.3 Observe and interact with the emulated devices using the Leshan server's web interface.
+13. If this test works:
+  1. lwm2m protocol adherence is ok:
+     if the emulated client connects to the leshan server, exchanges data, and responds to commands,
+     it demonstrates that the lwm2m protocol implementation is correct.
+  2. emulation validates that your codes logic e.g. reading data, creating lwm2m objects, sending
+     notifications, and handling commands is woking as intended.
+  3. server interaction with the leshan server e.g. data updates and control commands confirms that
+     your client and server communicate effectively.
+  4. Zepyhr implementation is ok : Zephyrs lwm2m engine is designed to abstract hardware specifics,
+     so most of the behaviour should remain consistent across emulates and real hardware env.
+  what cannot be tested via this emulation:
+  1. Hardware-specific code:
+     if your code interacts with hardware GPIO for leds sensor for data emulation does not
+     physically replicate these peripherals. emulation only verifies the logical handling of
+     such resources.
+     what to test additionally to make sure:
+     - ensure correct gpio configurations for your specific nordic board.
+     - verify real sensor or actuator behaviour during actual deployments.
+  2. Network Env.
+     emulation typically uses host machines network stack, which might not fully replicate
+     real world network conditions like:
+     - packet loss or latency.
+     - cellular or contrained networks (if applicable)
+     what to test to make sure:
+     - evaluate real workd scenarios like intermittent connectivity, nat traversal, or public vs.
+     private networks.
+  3. power and performence
+     emulation cannot measure the power consumption or runtime performence of the code on real
+     hardware.
+     what to test: test your code on real hardware to ensure it meets power and performence contraints.
+  4. Read world hardware often involves strict timing and interrupt handling, which emulation might
+     not fully simulate.
+     what to test:
+     confirm that timing critical operations e.g. leg toggling, sensor reading intervals work as
+     expected on the board.
+
+[Include openthread for the Implementation]
+
+14. analysis: the basics of the openthread protocol and its position in the hierarchy.
+15. build open thread for emulation
+    openthread provides a simulated platform posix platform for emulating thread devices
+    on linux.
+
+    15.0 build openthread simulation
+    $ cd openthread
+    $ ./script/build simulation
+
+    15.1 verify the build
+    ls build/bin
+
+    expected output:
+    ot-cli-ftd
+    ot-cli-mtd
+
+    15.2 set up multiple simulated nodes.
+
+    ./build/bin/ot-cli-ftd 1
+    ./build/bin/ot-cli-ftd 2
+    ./build/bin/ot-cli-ftd 3
+    ./build/bin/ot-cli-ftd 4
+
+    each node will open an interactive cli where you can configure and control thread.
+
+    15.3 form the network, on the first node, create and start a thread network
+
+    > dataset init new
+    > dataset commit active
+    > ifconfig up
+    > thread start
+
+    15.4  add other nodes to the network
+    on the other nodes, join the network by setting the network key and staring thread.
+
+    > dataset active <dataset-from-leader>
+    > ifconfig up
+    > thread start
+
+    15.5 use the ping command between nodes to test network connectivity.
+
+    > ping <node-ip>
+
+    15.6 debug and test
+     monitor network traffic: use wireshark with the wpan interface to capture thread network
+     traffic
+     15.6.0 bashscript to install wireshark.
+     15.6.1 test interactions use the openthread cli to:
+     - simulate network conditions   e.g. adding/removing nodes
+     - test thread specific features e.g. routing, commissioning
+     15.6.2 test application, develop and test applications that use openthread for example,
+     use CoAP to send messages between nodes.
+
+     > coap start
+     > coap get <node-ip> /resource
+
+15. using quemu for real hardware testing
+
+   15.1 flash qemu-emulated boards: zephyr can simulate openthread devices on quemu.
+     $ west build -b qemu_cortex_m3 path/to/your/openthread/application
+     $ west build -t run
+   15.2 Combine simulated and read devices: use qemu to emulate some devices while testing
+   with physical hardware for interoperability.
+
+16. Benefits of the emulation
+    - network scaling:    simulate lare mesh network for stress testing.
+    - debugging:          easily isolate and troubleshoot issues in a controlled environment.
+    - early development:  test application-layer-oriticiks e.g. CoAP, MQTT without hardware
+    dependency.
+
+17. Using qemu and openthreads simulation platform is effective in testing openthread settings and
+    configurations. allows robust development and debugging before deploying to real hardware.
+
+18. Detailed walkthrough:
+                Here’s a detailed walkthrough for testing OpenThread-specific and LwM2M-specific configurations at the emulation level.
+                This guide leverages the OpenThread simulation platform and Zephyr QEMU support to emulate Thread networks and LwM2M clients.
+                Part 1: Testing OpenThread-Specific Configuration
+                1. Set Up OpenThread Simulation
+                Step 1: Clone and Bootstrap OpenThread
+
+                git clone https://github.com/openthread/openthread.git
+                cd openthread
+                ./script/bootstrap
+
+                Step 2: Build OpenThread Simulation Platform
+
+                Build the simulation target, which creates binaries for full Thread devices (FTD) and minimal Thread devices (MTD):
+
+                ./script/build simulation
+
+                Step 3: Start Simulated Thread Nodes
+
+                Run multiple simulated Thread nodes:
+
+                ./build/bin/ot-cli-ftd 1
+                ./build/bin/ot-cli-ftd 2
+                ./build/bin/ot-cli-ftd 3
+                ./build/bin/ot-cli-ftd 4
+
+                Each command will launch an OpenThread CLI instance. The 1, 2, etc., specify unique node identifiers.
+                2. Configure the OpenThread Network
+                Step 1: Create a Thread Network on the Leader Node
+
+                In the CLI instance for Node 1:
+
+                > dataset init new
+                > dataset commit active
+                > ifconfig up
+                > thread start
+
+                The node will now function as the Thread network leader.
+                Step 2: Add Other Nodes to the Network
+
+                For Nodes 2, 3, and 4:
+
+                    Retrieve the active dataset from the leader:
+
+                > dataset active
+
+                Copy the dataset to the other nodes and configure them:
+
+                    > dataset active <copied-dataset>
+                    > ifconfig up
+                    > thread start
+
+                    Replace <copied-dataset> with the dataset string from the leader.
+               Step 3: Verify Connectivity
+
+                    Check the Thread network status:
+
+                > state
+
+                Output should be leader, router, or child depending on the node.
+
+                Ping between nodes:
+
+                    > ping <node-ip>
+
+                    Replace <node-ip> with the IPv6 address of another node.
+
+                3. Test OpenThread Features
+                Feature 1: CoAP Communication
+
+                    Start the CoAP server on Node 1:
+
+                > coap start
+
+                Send a GET request from Node 2 to Node 1:
+
+                    > coap get <node-1-ip> /resource
+
+                    Replace <node-1-ip> with Node 1's IPv6 address.
+
+                Feature 2: Multicast Messaging
+
+                    Send a multicast ping:
+
+                    > ping ff03::1
+
+                    All nodes in the network should respond.
+
+                Part 2: Testing LwM2M-Specific Configuration
+                1. Set Up Zephyr for LwM2M Simulation
+                Step 1: Install Zephyr and Toolchain
+
+                Follow the Zephyr Getting Started Guide to install dependencies and set up the Zephyr environment.
+                Step 2: Build the LwM2M Client for QEMU
+
+                Navigate to the LwM2M client example in the Zephyr repository:
+
+                cd zephyr/samples/net/lwm2m_client
+
+                Build the client for QEMU:
+
+                west build -b qemu_cortex_m3 .
+
+               2. Run the LwM2M Client in QEMU
+
+                    Start the LwM2M client:
+
+                    west build -t run
+
+                    The client will start in a QEMU emulation environment.
+
+                    Observe LwM2M client logs in the terminal. It should attempt to connect to the LwM2M server specified in prj.conf.
+
+                3. Configure LwM2M Server (Leshan Server)
+                Step 1: Start the Leshan Server
+
+                Run the Leshan demo server:
+
+                java -jar leshan-demo-server.jar
+
+                Access the server's UI at http://<server-ip>:8080.
+                Step 2: Verify Client Registration
+
+                Check that the emulated LwM2M client is registered on the server.
+                4. Test LwM2M Configuration
+                Feature 1: Observe Resource Updates
+
+                    Update a resource value on the client: In the QEMU client terminal:
+
+                    lwm2m_engine_set_s32("3300/0/5700", 12345);
+
+                    Verify the update on the Leshan server's UI under the client's 3300/0/5700 resource.
+
+                Feature 2: Execute Server-Initiated Commands
+
+                    Write to a writable resource (e.g., LED control).
+                        In the Leshan server UI, send a PUT or POST request to toggle the LED state.
+                        Observe the response in the QEMU client logs.
+
+                    Observe and read resources:
+                        Use the Leshan UI to send a READ command to observe a resource.
+
+                Feature 3: Notifications
+
+                    Configure a resource for periodic reporting:
+                        Enable notifications on a resource (e.g., 3300/0/5700).
+                        Verify that the client sends periodic updates to the server.
+
+               5. Integrating OpenThread and LwM2M
+
+                To integrate OpenThread and LwM2M:
+
+                    Ensure the Zephyr LwM2M client uses OpenThread as its network layer.
+                    Modify the prj.conf file to include OpenThread and LwM2M support:
+
+                    CONFIG_NET_L2_OPENTHREAD=y
+                    CONFIG_LWM2M=y
+                    CONFIG_COAP=y
+
+                    Rebuild and test the application.
+
+                Summary of Workflow
+
+                    Set up and emulate an OpenThread network using OpenThread's CLI tools.
+                    Build and run the Zephyr LwM2M client in QEMU with OpenThread integration.
+                    Verify LwM2M functionality (registration, resource updates, server commands).
+                    Combine OpenThread and LwM2M for full-stack testing.
+
+                This process ensures that both OpenThread-specific and LwM2M-specific configurations are thoroughly tested at the emulation
+                level before deployment to real hardware. Let me know if you need further guidance!
+
